@@ -1,3 +1,7 @@
+> Note this fork is a modified version of openzwave that includes changes
+making it easier to receive data on device changes
+
+
 node-openzwave
 ==============
 
@@ -7,6 +11,19 @@ Z-Wave network from JavaScript.
 
 It is currently able to scan a Z-Wave network, report on connected devices,
 monitor the network for changes, and has rudimentary write support.
+
+> This fork is a somewhat experimental version of the original
+> [node-openzwave](https://github.com/jperkin/node-openzwave) which appears to
+> be fairly unmaintained with not everything implemented yet.
+> With this fork I'm trying to improve on the original work based on changes
+> done by the community.
+>
+> Changes include:
+> * Support for Scene & Node Events
+> * More recent OpenZWave (1.3.x)
+> * Network healing functionality
+> * Support for `setConfigParam
+> * Instance control of switches
 
 ## Install
 
@@ -23,15 +40,16 @@ Start by loading the addon and creating a new instance, specifying a path to
 the USB device:
 
 ```js
-var OZW = require('openzwave');
-var zwave = new OZW('/dev/ttyUSB0');
+var OpenZWave = require('openzwave');
+var zwave     = new OpenZWave('/dev/ttyUSB0');
 ```
 
 An optional object can be passed at creation time to alter the behavior of the
 ZWave module.  The options currently supported and their defaults are:
 
 ```js
-var zwave = new OZW('/dev/ttyUSB0', {
+var OpenZWave = require('openzwave');
+var zwave     = new OpenZWave('/dev/ttyUSB0', {
         logging: false,           // enable logging to OZW_Log.txt
         consoleoutput: false,     // copy logging to the console
         saveconfig: false,        // write an XML network layout
@@ -94,6 +112,13 @@ carefully:
 ```js
 zwave.hardReset();      // destructive! will wipe out all known configuration
 zwave.softReset();      // non-destructive, just resets the chip
+```
+
+Repair network. Call 'healNetwork' will do a node-by-node network heal and perform
+a return route initialization.
+
+```js
+zwave.healNetwork();
 ```
 
 ### Events
@@ -294,6 +319,14 @@ zwave.on('notification', function(nodeid, notif) {
 
 zwave.on('scan complete', function() {
 	console.log('scan complete, hit ^C to finish.');
+});
+
+zwave.on('node event', function(nodeid, eventid) {
+  console.log('node%d: node event %d', nodeid, eventid);
+});
+
+zwave.on('scene event', function(nodeid, sceneid) {
+  console.log('node%d: scene %d activated', nodeid, sceneid);
 });
 
 zwave.connect();

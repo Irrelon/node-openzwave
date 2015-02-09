@@ -1,6 +1,7 @@
 {
-  "name": "openzwave",
-  "version": "0.0.32",
+  "author": "Irrelon Software Limited",
+  "name": "irrelonopenzwave",
+  "version": "1.0.0",
   "description": "Control a Z-Wave network via the Open Z-Wave library",
   "main": "./lib/openzwave.js",
   "scripts": {
@@ -9,25 +10,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "git://github.com/jperkin/node-openzwave.git"
+    "url": "git://github.com/irrelon/node-openzwave.git"
   },
   "keywords": [
     "zwave",
     "z-wave",
     "home",
     "automation",
-    "openzwave"
-  ],
-  "author": "Jonathan Perkin <jonathan@perkin.org.uk> (http://www.perkin.org.uk/)",
-  "licenses": [
-    {
-      "type": "ISC",
-      "url": "http://opensource.org/licenses/ISC"
-    },
-    {
-      "type": "GPLv3",
-      "url": "http://opensource.org/licenses/GPL-3.0"
-    }
+    "openzwave",
+    "irrelonopenzwave"
   ],
   "gypfile": true
 }

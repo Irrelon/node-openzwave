@@ -37,6 +37,7 @@ struct OZW: ObjectWrap {
 	static Handle<Value> New(const Arguments& args);
 	static Handle<Value> Connect(const Arguments& args);
 	static Handle<Value> Disconnect(const Arguments& args);
+	static Handle<Value> SetConfigParam(const Arguments& args);
 	static Handle<Value> SetValue(const Arguments& args);
 	static Handle<Value> SetLevel(const Arguments& args);
 	static Handle<Value> SetLocation(const Arguments& args);
@@ -47,6 +48,9 @@ struct OZW: ObjectWrap {
 	static Handle<Value> DisablePoll(const Arguments& args);
 	static Handle<Value> HardReset(const Arguments& args);
 	static Handle<Value> SoftReset(const Arguments& args);
+	static Handle<Value> HealNetworkNode(const Arguments& args);
+	static Handle<Value> HealNetwork(const Arguments& args);
+	static Handle<Value> GetNodeNeighbors(const Arguments& args);
 };
 
 Persistent<Object> context_obj;
@@ -85,6 +89,9 @@ static pthread_mutex_t znodes_mutex = PTHREAD_MUTEX_INITIALIZER;
 static std::list<NodeInfo *> znodes;
 
 static uint32_t homeid;
+
+// Validate values option flag
+static bool validate_values;
 
 /*
  * Return the node for this request.
@@ -165,6 +172,12 @@ void async_cb_handler(uv_async_t *handle, int status)
 		notif = zqueue.front();
 
 		switch (notif->type) {
+		case OpenZWave::Notification::Type_Group:
+			args[0] = String::New("group update");
+			args[1] = Integer::New(notif->nodeid);
+			MakeCallback(context_obj, "emit", 2, args);
+			break;
+
 		case OpenZWave::Notification::Type_DriverReady:
 			homeid = notif->homeid;
 			args[0] = String::New("driver ready");
@@ -223,7 +236,7 @@ void async_cb_handler(uv_async_t *handle, int status)
 					node->values.push_back(value);
 					pthread_mutex_unlock(&znodes_mutex);
 				}
-				OpenZWave::Manager::Get()->SetChangeVerified(value, true);
+				OpenZWave::Manager::Get()->SetChangeVerified(value, validate_values);
 			}
 
 			/*
@@ -307,6 +320,9 @@ void async_cb_handler(uv_async_t *handle, int status)
 			 */
 			case OpenZWave::ValueID::ValueType_Button:
 			{
+				// This commit does seem to have them though:
+				// https://github.com/voldemarpanso/node-openzwave/commit/4d495ab2258aac8343ebaf3a549f1afe1bbca3b5?diff=split
+				// @todo: see if this can be implemented to this code
 				break;
 			}
 			default:
@@ -402,6 +418,25 @@ void async_cb_handler(uv_async_t *handle, int status)
 			args[2] = Integer::New(notif->notification);
 			MakeCallback(context_obj, "emit", 3, args);
 			break;
+
+		/*
+		* A node event (including scene deactivation)
+		*/
+		case OpenZWave::Notification::Type_NodeEvent:
+			args[0] = String::New("node event");
+			args[1] = Integer::New(notif->nodeid);
+			args[2] = Integer::New(notif->event);
+			MakeCallback(context_obj, "emit", 3, args);
+			break;
+		/*
+		* A scene activation
+		*/
+		case OpenZWave::Notification::Type_SceneEvent:
+			args[0] = String::New("scene event");
+			args[1] = Integer::New(notif->nodeid);
+			args[2] = Integer::New(notif->sceneid);
+			MakeCallback(context_obj, "emit", 3, args);
+			break;
 		/*
 		 * Send unhandled events to stderr so we can monitor them if
 		 * necessary.
@@ -442,6 +477,11 @@ Handle<Value> OZW::New(const Arguments& args)
 	OpenZWave::Options::Get()->AddOptionBool("SuppressValueRefresh", opts->Get(String::New("suppressrefresh"))->BooleanValue());
 	OpenZWave::Options::Get()->Lock();
 
+	//Validation is technically set on a per-value basis, but requires a reference to the ValueID class to set,
+	//so would require a more major change to how Values are currently handled on the JS side. Instead this just
+	//saves to a static/file-scope config var which is picked up in the async callback
+	validate_values = opts->Get(String::New("validatevalues"))->BooleanValue();
+
 	return scope.Close(args.This());
 }
 
@@ -475,6 +515,28 @@ Handle<Value> OZW::Disconnect(const Arguments& args)
 	OpenZWave::Manager::Get()->RemoveWatcher(cb, NULL);
 	OpenZWave::Manager::Destroy();
 	OpenZWave::Options::Destroy();
+
+	return scope.Close(Undefined());
+}
+
+/*
+* Set Config Parameters
+*/
+Handle<Value> OZW::SetConfigParam(const Arguments& args)
+{
+	 HandleScope scope;
+
+	uint32_t homeid = args[0]->ToNumber()->Value();
+	uint8_t nodeid = args[1]->ToNumber()->Value();
+	uint8_t param = args[2]->ToNumber()->Value();
+	int32_t value = args[3]->ToNumber()->Value();
+
+	if (args.Length() < 5) {
+		OpenZWave::Manager::Get()->SetConfigParam(homeid, nodeid, param, value);
+	} else {
+		uint8_t size = args[4]->ToNumber()->Value();
+		OpenZWave::Manager::Get()->SetConfigParam(homeid, nodeid, param, value, size);
+	}
 
 	return scope.Close(Undefined());
 }
@@ -601,7 +663,7 @@ Handle<Value> OZW::SetName(const Arguments& args)
 /*
  * Switch a COMMAND_CLASS_SWITCH_BINARY on/off
  */
-void set_switch(uint8_t nodeid, bool state)
+void set_switch(uint8_t nodeid, bool state, uint8_t instance)
 {
 	NodeInfo *node;
 	std::list<OpenZWave::ValueID>::iterator vit;
@@ -611,6 +673,10 @@ void set_switch(uint8_t nodeid, bool state)
 			if ((*vit).GetCommandClassId() == 0x25) {
 				OpenZWave::Manager::Get()->SetValue(*vit, state);
 				break;
+				if ( ! instance || (*vit).GetInstance() == instance ) {
+					OpenZWave::Manager::Get()->SetValue(*vit, state);
+					break;
+				}
 			}
 		}
 	}
@@ -620,7 +686,13 @@ Handle<Value> OZW::SwitchOn(const Arguments& args)
 	HandleScope scope;
 
 	uint8_t nodeid = args[0]->ToNumber()->Value();
-	set_switch(nodeid, true);
+	uint8_t instance = 0;
+
+	if ( args.Length() > 1 ) {
+		instance = args[1]->ToNumber()->Value();
+	}
+
+	set_switch(nodeid, true, instance);
 
 	return scope.Close(Undefined());
 }
@@ -629,7 +701,12 @@ Handle<Value> OZW::SwitchOff(const Arguments& args)
 	HandleScope scope;
 
 	uint8_t nodeid = args[0]->ToNumber()->Value();
-	set_switch(nodeid, false);
+	uint8_t instance = 0;
+	if ( args.Length() > 1 ) {
+		instance = args[1]->ToNumber()->Value();
+	}
+
+	set_switch(nodeid, false, instance);
 
 	return scope.Close(Undefined());
 }
@@ -699,6 +776,62 @@ Handle<Value> OZW::SoftReset(const Arguments& args)
 	return scope.Close(Undefined());
 }
 
+/*
+* Heal network node by requesting the node rediscover their neighbors.
+*/
+Handle<Value> OZW::HealNetworkNode(const Arguments& args)
+{
+	HandleScope scope;
+
+	uint8_t nodeid = args[0]->ToNumber()->Value();
+	uint8_t doRR = args[1]->ToBoolean()->Value();
+
+	OpenZWave::Manager::Get()->HealNetworkNode(homeid, nodeid, doRR);
+
+	return scope.Close(Undefined());
+}
+
+/*
+* Heal network by requesting node's rediscover their neighbors.
+* Sends a ControllerCommand_RequestNodeNeighborUpdate to every node.
+* Can take a while on larger networks.
+*/
+Handle<Value> OZW::HealNetwork(const Arguments& args)
+{
+	HandleScope scope;
+
+	bool doRR = true;
+	OpenZWave::Manager::Get()->HealNetwork(homeid, doRR);
+
+	return scope.Close(Undefined());
+}
+
+/*
+* Gets the neighbors for a node
+*/
+Handle<Value> OZW::GetNodeNeighbors(const Arguments& args)
+{
+	HandleScope scope;
+	uint8* neighbors;
+
+	uint8_t nodeid = args[0]->ToNumber()->Value();
+	uint8 numNeighbors = OpenZWave::Manager::Get()->GetNodeNeighbors(homeid, nodeid, &neighbors);
+	Local<Array> o_neighbors = Array::New(numNeighbors);
+
+	for( uint8 nr=0; nr < numNeighbors; nr++) {
+		o_neighbors->Set(Integer::New(nr), Integer::New(neighbors[nr]));
+	}
+
+	Local<Value> argv[3];
+	argv[0] = String::New("neighbors");
+	argv[1] = Integer::New(nodeid);
+	argv[2] = o_neighbors;
+
+	MakeCallback(context_obj, "emit", 3, argv);
+
+	return scope.Close(Undefined());
+}
+
 extern "C" void init(Handle<Object> target)
 {
 	HandleScope scope;
@@ -709,6 +842,7 @@ extern "C" void init(Handle<Object> target)
 
 	NODE_SET_PROTOTYPE_METHOD(t, "connect", OZW::Connect);
 	NODE_SET_PROTOTYPE_METHOD(t, "disconnect", OZW::Disconnect);
+	NODE_SET_PROTOTYPE_METHOD(t, "setConfigParam", OZW::SetConfigParam);
 	NODE_SET_PROTOTYPE_METHOD(t, "setValue", OZW::SetValue);
 	NODE_SET_PROTOTYPE_METHOD(t, "setLevel", OZW::SetLevel);
 	NODE_SET_PROTOTYPE_METHOD(t, "setLocation", OZW::SetLocation);
@@ -719,6 +853,9 @@ extern "C" void init(Handle<Object> target)
 	NODE_SET_PROTOTYPE_METHOD(t, "disablePoll", OZW::EnablePoll);
 	NODE_SET_PROTOTYPE_METHOD(t, "hardReset", OZW::HardReset);
 	NODE_SET_PROTOTYPE_METHOD(t, "softReset", OZW::SoftReset);
+	NODE_SET_PROTOTYPE_METHOD(t, "healNetworkNode", OZW::HealNetworkNode);
+	NODE_SET_PROTOTYPE_METHOD(t, "healNetwork", OZW::HealNetwork);
+	NODE_SET_PROTOTYPE_METHOD(t, "getNeighbors", OZW::GetNodeNeighbors);
 
 	target->Set(String::NewSymbol("Emitter"), t->GetFunction());
 }
